@@ -21,6 +21,13 @@ for i, hp_set in enumerate(hyperparameter_sets):
     # Load a fresh model for each training run
     model = YOLO("yolo11n-obb.pt")  # load a pretrained model
 
+    # Reconfigure the model's head for 1 class
+    if hasattr(model.model, 'model') and len(model.model.model) > 0 and hasattr(model.model.model[-1], 'nc'):
+        model.model.model[-1].nc = 1
+        print(f"Reconfigured model head for {model.model.model[-1].nc} class.")
+    else:
+        print("Could not reconfigure model head. Proceeding with original configuration.")
+
     # Train the model
     results = model.train(
         data=data_yaml,
@@ -38,4 +45,4 @@ for i, hp_set in enumerate(hyperparameter_sets):
     # These ONNX files will be saved in the current working directory.
     # Training results (weights, plots, etc.) will be saved in the 'runs/' directory
     # under uniquely named folders (e.g., runs/obb/yolo11n_obb_hp_set_1).
-    model.export(format="onnx", filename=f"yolo11n-obb_hp_set_{i+1}.onnx")
+    model.export(format="onnx", name=f"yolo11n-obb_hp_set_{i+1}")
