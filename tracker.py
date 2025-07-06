@@ -48,6 +48,39 @@ def initialize_tracker(video_path, model_path, tracker_config):
 
     return model, cap, processed_track_ids, extracted_texts, track_colors, reader
 
+def perform_ocr_on_crop(crop_img, reader_instance, extracted_texts):
+    """
+    Performs OCR on a cropped image and adds extracted text to the collection.
+
+    Args:
+        crop_img (numpy.ndarray): The cropped image containing the object.
+        reader_instance (easyocr.Reader): EasyOCR reader instance.
+        extracted_texts (set): Set to store extracted texts.
+
+    Returns:
+        str or None: The extracted text if successful, None otherwise.
+    """
+    try:
+        # Convert the cropped image (OpenCV BGR format) to a PIL Image (RGB format).
+        pil_img = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
+
+        # Use EasyOCR to extract text.
+        ocr_result = reader_instance.readtext(crop_img)
+
+        if ocr_result:
+            text = ocr_result[0][1]  # Extract the text from the result
+            print(f"  - OCR Result: '{text}'")
+            # Add the cleaned text to our set of unique texts.
+            extracted_texts.add(text)
+            return text
+        else:
+            print("  - OCR Result: No text found.")
+            return None
+
+    except Exception as ocr_error:
+        print(f"  - OCR Error: {ocr_error}")
+        return None
+
 def process_frame(frame, model, processed_track_ids, extracted_texts, track_colors, reader_instance, tracker_config):
     """
     Processes a single frame from the video, performing object detection, OCR, and visualization.
@@ -88,29 +121,14 @@ def process_frame(frame, model, processed_track_ids, extracted_texts, track_colo
                 # Assign a random color for the bounding box.
                 track_colors[track_id] = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 
-                # --- TESSERACT OCR INTEGRATION ---
-                try:
-                    # Crop the object from the resized frame using the bounding box coordinates.
-                    x1, y1, x2, y2 = box
-                    # Add a small buffer to ensure the whole object is captured.
-                    crop_img = frame[max(0, y1):y2, max(0, x1):x2]
-
-                    # Convert the cropped image (OpenCV BGR format) to a PIL Image (RGB format).
-                    pil_img = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
-
-                    # Use EasyOCR to extract text.
-                    ocr_result = reader_instance.readtext(crop_img)
-
-                    if ocr_result:
-                        text = ocr_result[0][1]  # Extract the text from the result
-                        print(f"  - OCR Result: '{text}'")
-                        # Add the cleaned text to our set of unique texts.
-                        extracted_texts.add(text)
-                    else:
-                        print("  - OCR Result: No text found.")
-
-                except Exception as ocr_error:
-                    print(f"  - OCR Error: {ocr_error}")
+                # --- OCR PROCESSING ---
+                # Crop the object from the resized frame using the bounding box coordinates.
+                x1, y1, x2, y2 = box
+                # Add a small buffer to ensure the whole object is captured.
+                crop_img = frame[max(0, y1):y2, max(0, x1):x2]
+                
+                # Perform OCR on the cropped image
+                perform_ocr_on_crop(crop_img, reader_instance, extracted_texts)
                 # ---------------------------------
 
             # --- VISUALIZATION ---
