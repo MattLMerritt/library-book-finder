@@ -3,6 +3,7 @@ from ultralytics import YOLO
 import random
 from PIL import Image
 import easyocr
+import numpy as np
 
 def initialize_tracker(video_path, model_path, tracker_config, confidence_threshold=0.7):
     """
@@ -51,6 +52,7 @@ def initialize_tracker(video_path, model_path, tracker_config, confidence_thresh
 def perform_ocr_on_crop(crop_img, reader_instance, extracted_texts):
     """
     Performs OCR on a cropped image and adds extracted text to the collection.
+    Enhanced for OBB models with rotation handling and multiple orientation attempts.
 
     Args:
         crop_img (numpy.ndarray): The cropped image containing the object.
@@ -62,20 +64,62 @@ def perform_ocr_on_crop(crop_img, reader_instance, extracted_texts):
                Returns (None, 0.0) if no text found or error occurred.
     """
     try:
-        # Convert the cropped image (OpenCV BGR format) to a PIL Image (RGB format).
-        pil_img = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
+        # Skip if crop is too small
+        if crop_img.shape[0] < 10 or crop_img.shape[1] < 10:
+            print("  - OCR Result: Crop too small, skipping.")
+            return None, 0.0
 
-        # Use EasyOCR to extract text.
+        best_text = None
+        best_confidence = 0.0
+        
+        # Try OCR on original orientation first
         ocr_result = reader_instance.readtext(crop_img)
-
+        
         if ocr_result:
-            # EasyOCR returns: [([[x1, y1], [x2, y2], [x3, y3], [x4, y4]], text, confidence)]
-            text = ocr_result[0][1]  # Extract the text from the result
-            confidence = ocr_result[0][2]  # Extract the confidence score
-            print(f"  - OCR Result: '{text}' (Confidence: {confidence:.3f})")
-            # Add the cleaned text to our set of unique texts.
-            extracted_texts.add(text)
-            return text, confidence
+            for detection in ocr_result:
+                text = detection[1]
+                confidence = detection[2]
+                if confidence > best_confidence:
+                    best_text = text
+                    best_confidence = confidence
+
+        # For OBB models, also try different rotations to improve OCR accuracy
+        # This is especially useful for books that might be at various angles
+        rotations = [90, 180, 270]  # Try rotating the image
+        
+        for angle in rotations:
+            try:
+                # Rotate the crop
+                if angle == 90:
+                    rotated_crop = cv2.rotate(crop_img, cv2.ROTATE_90_CLOCKWISE)
+                elif angle == 180:
+                    rotated_crop = cv2.rotate(crop_img, cv2.ROTATE_180)
+                elif angle == 270:
+                    rotated_crop = cv2.rotate(crop_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                
+                # Try OCR on rotated image
+                ocr_result_rotated = reader_instance.readtext(rotated_crop)
+                
+                if ocr_result_rotated:
+                    for detection in ocr_result_rotated:
+                        text = detection[1]
+                        confidence = detection[2]
+                        if confidence > best_confidence:
+                            best_text = text
+                            best_confidence = confidence
+                            print(f"  - Better OCR found at {angle}° rotation")
+                            
+            except Exception as rotation_error:
+                # Continue if rotation fails
+                continue
+
+        if best_text and best_confidence > 0:
+            print(f"  - OCR Result: '{best_text}' (Confidence: {best_confidence:.3f})")
+            # Clean and add the text to our set of unique texts
+            cleaned_text = best_text.strip()
+            if cleaned_text:  # Only add non-empty text
+                extracted_texts.add(cleaned_text)
+            return best_text, best_confidence
         else:
             print("  - OCR Result: No text found.")
             return None, 0.0
@@ -84,9 +128,82 @@ def perform_ocr_on_crop(crop_img, reader_instance, extracted_texts):
         print(f"  - OCR Error: {ocr_error}")
         return None, 0.0
 
+def extract_rotated_crop(frame, obb_points):
+    """
+    Extracts a rotated crop from the frame using oriented bounding box points.
+    
+    Args:
+        frame (numpy.ndarray): The input frame
+        obb_points (numpy.ndarray): 8-point OBB coordinates [x1,y1,x2,y2,x3,y3,x4,y4]
+    
+    Returns:
+        numpy.ndarray: Cropped and rotated image
+    """
+    try:
+        # Reshape OBB points to 4x2 format
+        points = obb_points.reshape(4, 2).astype(np.float32)
+        
+        # Calculate the bounding rectangle
+        rect = cv2.minAreaRect(points)
+        box = cv2.boxPoints(rect)
+        box = np.array(box, dtype=np.int32)  # Use np.int32 instead of deprecated np.int0
+        
+        # Get width and height of the rotated rectangle
+        width = int(rect[1][0])
+        height = int(rect[1][1])
+        
+        # Ensure minimum size
+        if width < 10 or height < 10:
+            raise ValueError("Rotated crop too small")
+        
+        # Define destination points for perspective transform
+        dst_pts = np.array([
+            [0, height-1],
+            [0, 0],
+            [width-1, 0],
+            [width-1, height-1]
+        ], dtype=np.float32)
+        
+        # Get perspective transform matrix
+        M = cv2.getPerspectiveTransform(box.astype(np.float32), dst_pts)
+        
+        # Apply perspective transform
+        rotated_crop = cv2.warpPerspective(frame, M, (width, height))
+        
+        return rotated_crop
+        
+    except Exception as e:
+        print(f"Error extracting rotated crop: {e}")
+        # Fallback to regular bounding box crop
+        try:
+            # Flatten and extract coordinates properly
+            coords = obb_points.flatten()
+            x_coords = coords[::2]  # x coordinates
+            y_coords = coords[1::2]  # y coordinates
+            
+            x1, x2 = int(np.min(x_coords)), int(np.max(x_coords))
+            y1, y2 = int(np.min(y_coords)), int(np.max(y_coords))
+            
+            # Ensure valid crop bounds
+            h, w = frame.shape[:2]
+            x1, x2 = max(0, x1), min(w, x2)
+            y1, y2 = max(0, y1), min(h, y2)
+            
+            if x2 > x1 and y2 > y1:
+                return frame[y1:y2, x1:x2]
+            else:
+                # Return a small dummy crop if bounds are invalid
+                return np.zeros((20, 20, 3), dtype=np.uint8)
+                
+        except Exception as fallback_error:
+            print(f"Fallback crop also failed: {fallback_error}")
+            # Return a small dummy crop as last resort
+            return np.zeros((20, 20, 3), dtype=np.uint8)
+
 def process_frame(frame, model, track_ocr_confidence, extracted_texts, track_colors, reader_instance, tracker_config, confidence_threshold):
     """
     Processes a single frame from the video, performing object detection, OCR, and visualization.
+    Handles both regular bounding boxes and oriented bounding boxes (OBB).
 
     Args:
         frame (numpy.ndarray): The video frame to process.
@@ -109,7 +226,65 @@ def process_frame(frame, model, track_ocr_confidence, extracted_texts, track_col
     # Run YOLO tracking on the resized frame.
     results = model.track(frame, persist=True, tracker=tracker_config)
 
-    if results[0].boxes.id is not None:
+    # Check if we have OBB results or regular box results
+    has_obb = hasattr(results[0], 'obb') and results[0].obb is not None
+    has_boxes = hasattr(results[0], 'boxes') and results[0].boxes is not None and results[0].boxes.id is not None
+
+    if has_obb and results[0].obb.id is not None:
+        # Handle OBB (Oriented Bounding Box) format
+        obb_coords = results[0].obb.xyxyxyxy.cpu().numpy()  # 8-point coordinates
+        track_ids = results[0].obb.id.cpu().numpy().astype(int)
+        class_ids = results[0].obb.cls.cpu().numpy().astype(int)
+
+        for obb_points, track_id, cls_id in zip(obb_coords, track_ids, class_ids):
+            # --- CONFIDENCE-BASED OCR LOGIC ---
+            current_confidence = track_ocr_confidence.get(track_id, 0.0)
+            should_attempt_ocr = current_confidence < confidence_threshold
+            
+            if should_attempt_ocr:
+                if track_id not in track_ocr_confidence:
+                    print(f"\n--- NEW OBJECT DETECTED (OBB) ---")
+                    print(f"  - Track ID: {track_id}, Class: {model.names[cls_id]}")
+                    # Assign a random color for the bounding box.
+                    track_colors[track_id] = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+                else:
+                    print(f"\n--- RETRYING OCR (Low Confidence: {current_confidence:.3f}) ---")
+                    print(f"  - Track ID: {track_id}, Class: {model.names[cls_id]}")
+
+                # --- OCR PROCESSING ---
+                # Extract rotated crop using OBB coordinates
+                crop_img = extract_rotated_crop(frame, obb_points)
+                
+                # Perform OCR on the cropped image
+                text, confidence = perform_ocr_on_crop(crop_img, reader_instance, extracted_texts)
+                
+                # Update the confidence score for this track ID
+                if confidence > current_confidence:
+                    track_ocr_confidence[track_id] = confidence
+                    if confidence >= confidence_threshold:
+                        print(f"  - OCR SUCCESS: Confidence {confidence:.3f} meets threshold {confidence_threshold}")
+                    else:
+                        print(f"  - OCR RETRY NEEDED: Confidence {confidence:.3f} below threshold {confidence_threshold}")
+                else:
+                    print(f"  - OCR: No improvement in confidence ({confidence:.3f} <= {current_confidence:.3f})")
+                # ---------------------------------
+
+            # --- VISUALIZATION ---
+            # Draw oriented bounding box
+            points = obb_points.reshape(4, 2).astype(int)
+            color = track_colors.get(track_id, (0, 255, 0))
+            cv2.polylines(frame, [points], True, color, 2)
+            
+            # Add label
+            label = f"ID:{track_id} {model.names[cls_id]}"
+            label_pos = (int(points[0][0]), int(points[0][1]) - 10)
+            (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.rectangle(frame, (label_pos[0], label_pos[1] - text_height - 5), 
+                         (label_pos[0] + text_width, label_pos[1]), color, -1)
+            cv2.putText(frame, label, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+    elif has_boxes:
+        # Handle regular bounding box format (fallback)
         boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
         track_ids = results[0].boxes.id.cpu().numpy().astype(int)
         class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
@@ -121,7 +296,7 @@ def process_frame(frame, model, track_ocr_confidence, extracted_texts, track_col
             
             if should_attempt_ocr:
                 if track_id not in track_ocr_confidence:
-                    print(f"\n--- NEW OBJECT DETECTED ---")
+                    print(f"\n--- NEW OBJECT DETECTED (BBOX) ---")
                     print(f"  - Track ID: {track_id}, Class: {model.names[cls_id]}")
                     # Assign a random color for the bounding box.
                     track_colors[track_id] = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
@@ -213,14 +388,12 @@ def run_tracker(video_path, model_path, tracker_config):
 if __name__ == "__main__":
     # --- CONFIGURATION ---
 
-    # For Windows users, you might need to specify the path to the Tesseract executable.
-
     # Path to the video file to be processed.
     # A video with clear text (like street signs, license plates, or book spines) is ideal for testing.
     VIDEO_PATH = "data/5673626-hd_1920_1080_30fps.mp4" 
 
-    # Path to the YOLO model file. 'yolov8n.pt' is a small, fast model.
-    MODEL_PATH = 'license_plate_detector.pt'
+    # Path to the YOLO OBB model file. Using the trained OBB model for oriented bounding boxes.
+    MODEL_PATH = 'yolo11n-obb.pt'
 
     # Tracker configuration file. ByteTrack is a robust tracker.
     # Other options include 'botsort.yaml'.
