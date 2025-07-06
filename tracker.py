@@ -1,14 +1,15 @@
 import cv2
 from ultralytics import YOLO
 import random
-import pytesseract
 from PIL import Image
+import easyocr
+
+# Initialize the EasyOCR reader.
+reader = easyocr.Reader(['en'])
 
 # --- CONFIGURATION ---
 
 # For Windows users, you might need to specify the path to the Tesseract executable.
-# Uncomment the line below and set the correct path if pytesseract cannot find the command.
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # Path to the video file to be processed.
 # A video with clear text (like street signs, license plates, or book spines) is ideal for testing.
@@ -80,7 +81,7 @@ def run_tracker():
 
             for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
                 # --- NEW OBJECT DETECTION & OCR LOGIC ---
-                if track_id not in processed_track_ids:
+                if True or track_id not in processed_track_ids:
                     print(f"\n--- NEW OBJECT DETECTED ---")
                     print(f"  - Track ID: {track_id}, Class: {model.names[cls_id]}")
 
@@ -99,10 +100,11 @@ def run_tracker():
                         # Convert the cropped image (OpenCV BGR format) to a PIL Image (RGB format).
                         pil_img = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
 
-                        # Use Tesseract to extract text.
-                        text = pytesseract.image_to_string(pil_img, config='--psm 6').strip()
+                        # Use EasyOCR to extract text.
+                        ocr_result = reader.readtext(crop_img)
 
-                        if text:
+                        if ocr_result:
+                            text = ocr_result[0][1]  # Extract the text from the result
                             print(f"  - OCR Result: '{text}'")
                             # Add the cleaned text to our set of unique texts.
                             extracted_texts.add(text)
@@ -122,7 +124,7 @@ def run_tracker():
                 cv2.rectangle(frame, (x1, y1 - text_height - 10), (x1 + text_width, y1), color, -1)
                 cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        cv2.imshow("YOLO Object Tracker with OCR", frame)
+        # cv2.imshow("YOLO Object Tracker with OCR", frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

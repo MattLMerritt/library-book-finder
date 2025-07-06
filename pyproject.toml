@@ -5,6 +5,7 @@ description = "This project aims to solve the challenge of locating a book on a 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "easyocr>=1.7.2",
     "opencv-python>=4.11.0.86",
     "pytesseract>=0.3.13",
     "ultralytics>=8.3.162",
