@@ -4,7 +4,7 @@ import random
 from PIL import Image
 import easyocr
 
-def initialize_tracker(video_path, model_path, tracker_config):
+def initialize_tracker(video_path, model_path, tracker_config, confidence_threshold=0.7):
     """
     Initializes the YOLO model, video capture, and other configurations.
 
@@ -12,17 +12,17 @@ def initialize_tracker(video_path, model_path, tracker_config):
         video_path (str): Path to the video file.
         model_path (str): Path to the YOLO model.
         tracker_config (str): Path to the tracker configuration file.
+        confidence_threshold (float): Minimum confidence threshold for OCR success (0.0-1.0).
 
     Returns:
         tuple: A tuple containing the YOLO model, video capture object,
-               a set for processed track IDs, a set for extracted texts,
-               and a dictionary for track colors.
+               tracking data structures, and configuration values.
     """
     # Initialize the EasyOCR reader.
     reader = easyocr.Reader(['en'])
 
-    # A set to store the IDs of objects that have already been processed for OCR.
-    processed_track_ids = set()
+    # A dictionary to store OCR confidence scores for each track ID.
+    track_ocr_confidence = {}
     
     # A set to store all unique texts extracted via OCR.
     extracted_texts = set()
@@ -35,7 +35,7 @@ def initialize_tracker(video_path, model_path, tracker_config):
         model = YOLO(model_path)
     except Exception as e:
         print(f"Error loading YOLO model: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     # Open the video file.
     try:
@@ -44,9 +44,9 @@ def initialize_tracker(video_path, model_path, tracker_config):
             raise IOError(f"Cannot open video file: {video_path}")
     except Exception as e:
         print(f"Error opening video file: {e}")
-        return model, None, None, None, None, reader
+        return model, None, None, None, None, reader, confidence_threshold
 
-    return model, cap, processed_track_ids, extracted_texts, track_colors, reader
+    return model, cap, track_ocr_confidence, extracted_texts, track_colors, reader, confidence_threshold
 
 def perform_ocr_on_crop(crop_img, reader_instance, extracted_texts):
     """
@@ -58,7 +58,8 @@ def perform_ocr_on_crop(crop_img, reader_instance, extracted_texts):
         extracted_texts (set): Set to store extracted texts.
 
     Returns:
-        str or None: The extracted text if successful, None otherwise.
+        tuple: (text, confidence) where text is the extracted text and confidence is the OCR confidence score (0.0-1.0).
+               Returns (None, 0.0) if no text found or error occurred.
     """
     try:
         # Convert the cropped image (OpenCV BGR format) to a PIL Image (RGB format).
@@ -68,31 +69,34 @@ def perform_ocr_on_crop(crop_img, reader_instance, extracted_texts):
         ocr_result = reader_instance.readtext(crop_img)
 
         if ocr_result:
+            # EasyOCR returns: [([[x1, y1], [x2, y2], [x3, y3], [x4, y4]], text, confidence)]
             text = ocr_result[0][1]  # Extract the text from the result
-            print(f"  - OCR Result: '{text}'")
+            confidence = ocr_result[0][2]  # Extract the confidence score
+            print(f"  - OCR Result: '{text}' (Confidence: {confidence:.3f})")
             # Add the cleaned text to our set of unique texts.
             extracted_texts.add(text)
-            return text
+            return text, confidence
         else:
             print("  - OCR Result: No text found.")
-            return None
+            return None, 0.0
 
     except Exception as ocr_error:
         print(f"  - OCR Error: {ocr_error}")
-        return None
+        return None, 0.0
 
-def process_frame(frame, model, processed_track_ids, extracted_texts, track_colors, reader_instance, tracker_config):
+def process_frame(frame, model, track_ocr_confidence, extracted_texts, track_colors, reader_instance, tracker_config, confidence_threshold):
     """
     Processes a single frame from the video, performing object detection, OCR, and visualization.
 
     Args:
         frame (numpy.ndarray): The video frame to process.
         model (YOLO): The YOLO model.
-        processed_track_ids (set): Set of already processed track IDs.
+        track_ocr_confidence (dict): Dictionary storing OCR confidence scores for each track ID.
         extracted_texts (set): Set of extracted texts.
         track_colors (dict): Dictionary of track colors.
-        reader (easyocr.Reader): EasyOCR reader instance.
+        reader_instance (easyocr.Reader): EasyOCR reader instance.
         tracker_config (str): Path to the tracker configuration file.
+        confidence_threshold (float): Minimum confidence threshold for OCR success.
     """
     # --- PREPROCESSING: Resize the frame ---
     try:
@@ -111,15 +115,19 @@ def process_frame(frame, model, processed_track_ids, extracted_texts, track_colo
         class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
 
         for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
-            # --- NEW OBJECT DETECTION & OCR LOGIC ---
-            if track_id not in processed_track_ids:
-                print(f"\n--- NEW OBJECT DETECTED ---")
-                print(f"  - Track ID: {track_id}, Class: {model.names[cls_id]}")
-
-                # Add the new track_id to our set of processed IDs.
-                processed_track_ids.add(track_id)
-                # Assign a random color for the bounding box.
-                track_colors[track_id] = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+            # --- CONFIDENCE-BASED OCR LOGIC ---
+            current_confidence = track_ocr_confidence.get(track_id, 0.0)
+            should_attempt_ocr = current_confidence < confidence_threshold
+            
+            if should_attempt_ocr:
+                if track_id not in track_ocr_confidence:
+                    print(f"\n--- NEW OBJECT DETECTED ---")
+                    print(f"  - Track ID: {track_id}, Class: {model.names[cls_id]}")
+                    # Assign a random color for the bounding box.
+                    track_colors[track_id] = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+                else:
+                    print(f"\n--- RETRYING OCR (Low Confidence: {current_confidence:.3f}) ---")
+                    print(f"  - Track ID: {track_id}, Class: {model.names[cls_id]}")
 
                 # --- OCR PROCESSING ---
                 # Crop the object from the resized frame using the bounding box coordinates.
@@ -128,7 +136,17 @@ def process_frame(frame, model, processed_track_ids, extracted_texts, track_colo
                 crop_img = frame[max(0, y1):y2, max(0, x1):x2]
                 
                 # Perform OCR on the cropped image
-                perform_ocr_on_crop(crop_img, reader_instance, extracted_texts)
+                text, confidence = perform_ocr_on_crop(crop_img, reader_instance, extracted_texts)
+                
+                # Update the confidence score for this track ID
+                if confidence > current_confidence:
+                    track_ocr_confidence[track_id] = confidence
+                    if confidence >= confidence_threshold:
+                        print(f"  - OCR SUCCESS: Confidence {confidence:.3f} meets threshold {confidence_threshold}")
+                    else:
+                        print(f"  - OCR RETRY NEEDED: Confidence {confidence:.3f} below threshold {confidence_threshold}")
+                else:
+                    print(f"  - OCR: No improvement in confidence ({confidence:.3f} <= {current_confidence:.3f})")
                 # ---------------------------------
 
             # --- VISUALIZATION ---
@@ -162,13 +180,15 @@ def run_tracker(video_path, model_path, tracker_config):
     """
     Initializes and runs the YOLO object tracker on a video file.
     It identifies new objects, performs OCR on them, and stores unique text.
+    Uses confidence-based OCR retry system for improved accuracy.
     """
-    model, cap, processed_track_ids, extracted_texts, track_colors, reader = initialize_tracker(video_path, model_path, tracker_config)
+    model, cap, track_ocr_confidence, extracted_texts, track_colors, reader, confidence_threshold = initialize_tracker(video_path, model_path, tracker_config)
 
     if cap is None:
         return
 
     print("Successfully opened video. Starting tracker...")
+    print(f"OCR Confidence Threshold: {confidence_threshold}")
     print("Press 'q' to quit.")
 
     # Main loop to process each frame of the video.
@@ -177,7 +197,7 @@ def run_tracker(video_path, model_path, tracker_config):
         if not success:
             break
 
-        process_frame(frame, model, processed_track_ids, extracted_texts, track_colors, reader, tracker_config)
+        process_frame(frame, model, track_ocr_confidence, extracted_texts, track_colors, reader, tracker_config, confidence_threshold)
 
         cv2.imshow("YOLO Object Tracker with OCR", frame)
 
