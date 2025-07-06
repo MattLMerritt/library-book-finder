@@ -1,0 +1,7 @@
+[project]
+name = "library-book-finder"
+version = "0.1.0"
+description = "This project aims to solve the challenge of locating a book on a dense library shelf. It allows a user to "scan" a shelf of books using a camera and quickly identify if their desired book is present."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
