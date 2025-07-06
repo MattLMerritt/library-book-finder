@@ -1,35 +1,41 @@
 from ultralytics import YOLO
-import random
-import ultralytics
-
-# Hyperparameters section
-epochs = 50  # Reduced number of epochs
-batch_size = 16
-learning_rate = 0.001
-
-# Load a model
-model = YOLO("yolo11n-obb.pt")  # load a pretrained model
+# Define multiple hyperparameter sets for experimentation
+hyperparameter_sets = [
+    {"epochs": 50, "batch_size": 16, "learning_rate": 0.001},
+    {"epochs": 100, "batch_size": 16, "learning_rate": 0.001},
+    {"epochs": 50, "batch_size": 32, "learning_rate": 0.0005},
+    {"epochs": 100, "batch_size": 32, "learning_rate": 0.0005},
+]
 
 # Load dataset configuration
-data_yaml = "data/LibVision 2 -No Other Class-.v1i.yolov8-obb/data.yaml"
+data_yaml = "data/book_only.yaml"
 
-# Limit training data (example: use 20% of the data)
-subset_ratio = 0.001
+for i, hp_set in enumerate(hyperparameter_sets):
+    epochs = hp_set["epochs"]
+    batch_size = hp_set["batch_size"]
+    learning_rate = hp_set["learning_rate"]
 
-# Train the model
-results = model.train(
-    data=data_yaml,
-    epochs=epochs,
-    batch=batch_size,
-    lr0=learning_rate,
-    fraction=subset_ratio # Use a subset of the data for faster training
-)
+    print(f"\n--- Training with Hyperparameter Set {i+1} ---")
+    print(f"Epochs: {epochs}, Batch Size: {batch_size}, Learning Rate: {learning_rate}")
 
-# Evaluate the model's performance on the validation set
-metrics = model.val()  # evaluate model performance on the validation set
+    # Load a fresh model for each training run
+    model = YOLO("yolo11n-obb.pt")  # load a pretrained model
 
-# Reset unsupported arguments before exporting
-model.args.pop("fraction", None)  # Remove 'fraction' if it exists in model arguments
+    # Train the model
+    results = model.train(
+        data=data_yaml,
+        epochs=epochs,
+        batch=batch_size,
+        lr0=learning_rate,
+        name=f"yolo11n_obb_hp_set_{i+1}" # Unique name for each run
+    )
 
-# Export the trained model to a format suitable for deployment
-model.export(format="onnx")  # export the model to ONNX format
+    # Evaluate the model's performance on the validation set
+    metrics = model.val()  # evaluate model performance on the validation set
+
+    # Export the trained model to a format suitable for deployment
+    # Save with a unique name based on the hyperparameter set.
+    # These ONNX files will be saved in the current working directory.
+    # Training results (weights, plots, etc.) will be saved in the 'runs/' directory
+    # under uniquely named folders (e.g., runs/obb/yolo11n_obb_hp_set_1).
+    model.export(format="onnx", filename=f"yolo11n-obb_hp_set_{i+1}.onnx")
