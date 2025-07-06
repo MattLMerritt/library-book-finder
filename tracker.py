@@ -35,7 +35,7 @@ def initialize_tracker(video_path, model_path, tracker_config):
         model = YOLO(model_path)
     except Exception as e:
         print(f"Error loading YOLO model: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     # Open the video file.
     try:
@@ -44,11 +44,11 @@ def initialize_tracker(video_path, model_path, tracker_config):
             raise IOError(f"Cannot open video file: {video_path}")
     except Exception as e:
         print(f"Error opening video file: {e}")
-        return model, None, None, None, None
+        return model, None, None, None, None, reader
 
-    return model, cap, processed_track_ids, extracted_texts, track_colors
+    return model, cap, processed_track_ids, extracted_texts, track_colors, reader
 
-def process_frame(frame, model, processed_track_ids, extracted_texts, track_colors, reader, tracker_config):
+def process_frame(frame, model, processed_track_ids, extracted_texts, track_colors, reader_instance, tracker_config):
     """
     Processes a single frame from the video, performing object detection, OCR, and visualization.
 
@@ -79,7 +79,7 @@ def process_frame(frame, model, processed_track_ids, extracted_texts, track_colo
 
         for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
             # --- NEW OBJECT DETECTION & OCR LOGIC ---
-            if True or track_id not in processed_track_ids:
+            if track_id not in processed_track_ids:
                 print(f"\n--- NEW OBJECT DETECTED ---")
                 print(f"  - Track ID: {track_id}, Class: {model.names[cls_id]}")
 
@@ -99,7 +99,7 @@ def process_frame(frame, model, processed_track_ids, extracted_texts, track_colo
                     pil_img = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
 
                     # Use EasyOCR to extract text.
-                    ocr_result = reader.readtext(crop_img)
+                    ocr_result = reader_instance.readtext(crop_img)
 
                     if ocr_result:
                         text = ocr_result[0][1]  # Extract the text from the result
@@ -145,7 +145,7 @@ def run_tracker(video_path, model_path, tracker_config):
     Initializes and runs the YOLO object tracker on a video file.
     It identifies new objects, performs OCR on them, and stores unique text.
     """
-    model, cap, processed_track_ids, extracted_texts, track_colors = initialize_tracker(video_path, model_path, tracker_config)
+    model, cap, processed_track_ids, extracted_texts, track_colors, reader = initialize_tracker(video_path, model_path, tracker_config)
 
     if cap is None:
         return
@@ -159,7 +159,7 @@ def run_tracker(video_path, model_path, tracker_config):
         if not success:
             break
 
-        process_frame(frame, model, processed_track_ids, extracted_texts, track_colors, easyocr.Reader(['en']), tracker_config)
+        process_frame(frame, model, processed_track_ids, extracted_texts, track_colors, reader, tracker_config)
 
         cv2.imshow("YOLO Object Tracker with OCR", frame)
 
