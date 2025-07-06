@@ -15,10 +15,25 @@ import numpy as np
 import random
 import hashlib
 import time
-from typing import Dict, Set, Tuple, Optional, Union
+import heapq # Import for priority queue
+from typing import Dict, Set, Tuple, Optional, Union, List
 from dataclasses import dataclass, field
 from ultralytics import YOLO
 import easyocr
+
+
+@dataclass(order=True)
+class DetectionPriority:
+    """
+    Helper class for priority queue.
+    Priority is negative so that heapq (min-heap) can be used as a max-heap.
+    """
+    priority: float
+    frame_count: int = field(compare=False)
+    detection_data: Dict = field(compare=False)
+    track_id: int = field(compare=False)
+    cls_id: int = field(compare=False)
+    model: YOLO = field(compare=False)
 
 
 @dataclass
@@ -58,7 +73,7 @@ class OCRProcessor:
         self._cache = {}  # Cache for repeated OCR operations
     
     def extract_text_with_rotations(self, crop_img: np.ndarray, 
-                                   rotations: Tuple[int, ...] = (90, 180, 270),
+                                   obb_points: np.ndarray,
                                    early_exit_confidence: float = 0.9) -> Tuple[Optional[str], float]:
         """
         Perform OCR on image with multiple rotation attempts for better accuracy.
@@ -66,7 +81,7 @@ class OCRProcessor:
         
         Args:
             crop_img: Cropped image for OCR
-            rotations: Angles to try for rotation
+            obb_points: OBB coordinates for orientation
             early_exit_confidence: Stop trying rotations if this confidence is reached
             
         Returns:
@@ -85,6 +100,9 @@ class OCRProcessor:
             return cached_result
         
         best_text, best_confidence = None, 0.0
+        
+        # Get optimal rotation strategy based on OBB
+        rotations = self.get_optimal_ocr_strategy(obb_points)
         
         # Try original orientation first
         text, confidence = self._perform_ocr(crop_img)
@@ -201,6 +219,42 @@ class OCRProcessor:
             270: cv2.ROTATE_90_COUNTERCLOCKWISE
         }
         return cv2.rotate(image, rotation_map[angle])
+
+    def get_optimal_ocr_strategy(self, obb_points: np.ndarray) -> Tuple[int, ...]:
+        """Determine optimal OCR strategy based on OBB orientation."""
+        orientation = OCRProcessor.calculate_obb_orientation(obb_points)
+        
+        if orientation == "vertical_normal":
+            return (0,)
+        elif orientation == "vertical_inverted":
+            return (180,)
+        elif orientation == "horizontal":
+            return (90, 270)
+        else:
+            return (0, 90, 180, 270)
+
+    @staticmethod
+    def calculate_obb_orientation(obb_points: np.ndarray) -> str:
+        """
+        Calculate the orientation of the OBB based on its dimensions.
+        Assumes OBB points are ordered (top-left, top-right, bottom-right, bottom-left)
+        or similar, such that adjacent points define width/height.
+        """
+        points = obb_points.reshape(4, 2)
+        
+        # Calculate side lengths
+        side1_len = np.linalg.norm(points[0] - points[1]) # Top side
+        side2_len = np.linalg.norm(points[1] - points[2]) # Right side
+
+        # Determine if it's more vertical or horizontal
+        if side2_len > side1_len:
+            # Potentially vertical. Check if the text is upright or inverted.
+            # This is a simplification; a more robust check would involve
+            # analyzing the angle of the longest side relative to the y-axis.
+            # For book spines, we assume vertical_normal for now.
+            return "vertical_normal"
+        else:
+            return "horizontal"
 
 
 class CropExtractor:
@@ -410,8 +464,10 @@ class DetectionProcessor:
         
         # Extract crop and perform OCR
         crop_img = self._extract_crop(frame, detection_data)
+        
+        # Pass obb_points to extract_text_with_rotations for OBB-aware OCR
         text, confidence = self.ocr_processor.extract_text_with_rotations(
-            crop_img, self.config.ocr_rotations, self.config.early_exit_confidence
+            crop_img, detection_data['coordinates'], self.config.early_exit_confidence
         )
         
         # Update confidence and extracted texts
@@ -536,58 +592,108 @@ class VideoTracker:
         # Scale coordinates back to original frame size if needed
         scale_factor = 1.0 / self.config.frame_resize_factor if self.config.frame_resize_factor != 1.0 else 1.0
         
-        # Process detections based on type
+        # Collect all detections with their priorities
+        all_detections_with_priority: List[DetectionPriority] = []
+
         if hasattr(result, 'obb') and result.obb is not None and result.obb.id is not None:
-            self._process_obb_detections(original_frame, result, scale_factor)
-        elif hasattr(result, 'boxes') and result.boxes is not None and result.boxes.id is not None:
-            self._process_regular_detections(original_frame, result, scale_factor)
-    
-    def _process_obb_detections(self, frame: np.ndarray, result, scale_factor: float) -> None:
-        """Process OBB detections with coordinate scaling."""
-        obb_coords = result.obb.xyxyxyxy.cpu().numpy()
-        track_ids = result.obb.id.cpu().numpy().astype(int)
-        class_ids = result.obb.cls.cpu().numpy().astype(int)
+            obb_coords = result.obb.xyxyxyxy.cpu().numpy()
+            track_ids = result.obb.id.cpu().numpy().astype(int)
+            class_ids = result.obb.cls.cpu().numpy().astype(int)
+            confidences = result.obb.conf.cpu().numpy()
+
+            for obb_points, track_id, cls_id, conf in zip(obb_coords, track_ids, class_ids, confidences):
+                if scale_factor != 1.0:
+                    obb_points = obb_points * scale_factor
+                
+                detection_data = {
+                    'coordinates': obb_points,
+                    'track_id': track_id,
+                    'cls_id': cls_id,
+                    'is_obb': True,
+                    'confidence': conf
+                }
+                priority = self._calculate_detection_priority(detection_data, conf)
+                heapq.heappush(all_detections_with_priority, DetectionPriority(
+                    priority=priority,
+                    frame_count=self.frame_count,
+                    detection_data=detection_data,
+                    track_id=track_id,
+                    cls_id=cls_id,
+                    model=self.model
+                ))
+
+        if hasattr(result, 'boxes') and result.boxes is not None and result.boxes.id is not None:
+            boxes = result.boxes.xyxy.cpu().numpy().astype(int)
+            track_ids = result.boxes.id.cpu().numpy().astype(int)
+            class_ids = result.boxes.cls.cpu().numpy().astype(int)
+            confidences = result.boxes.conf.cpu().numpy()
+
+            for box, track_id, cls_id, conf in zip(boxes, track_ids, class_ids, confidences):
+                if scale_factor != 1.0:
+                    box = (box * scale_factor).astype(int)
+                
+                detection_data = {
+                    'coordinates': box,
+                    'track_id': track_id,
+                    'cls_id': cls_id,
+                    'is_obb': False,
+                    'confidence': conf
+                }
+                priority = self._calculate_detection_priority(detection_data, conf)
+                heapq.heappush(all_detections_with_priority, DetectionPriority(
+                    priority=priority,
+                    frame_count=self.frame_count,
+                    detection_data=detection_data,
+                    track_id=track_id,
+                    cls_id=cls_id,
+                    model=self.model
+                ))
         
-        for obb_points, track_id, cls_id in zip(obb_coords, track_ids, class_ids):
-            # Scale coordinates back to original frame size
-            if scale_factor != 1.0:
-                obb_points = obb_points * scale_factor
-            
-            detection_data = {
-                'coordinates': obb_points,
-                'track_id': track_id,
-                'cls_id': cls_id,
-                'is_obb': True
-            }
-            
+        # Process detections by priority
+        while all_detections_with_priority:
+            detection_prio_obj = heapq.heappop(all_detections_with_priority)
             self.detection_processor.process_detection(
-                frame, detection_data, self.track_ocr_confidence,
-                self.extracted_texts, self.track_colors, self.model, self.frame_count
+                original_frame, 
+                detection_prio_obj.detection_data, 
+                self.track_ocr_confidence,
+                self.extracted_texts, 
+                self.track_colors, 
+                detection_prio_obj.model, 
+                detection_prio_obj.frame_count
             )
     
-    def _process_regular_detections(self, frame: np.ndarray, result, scale_factor: float) -> None:
-        """Process regular bounding box detections with coordinate scaling."""
-        boxes = result.boxes.xyxy.cpu().numpy().astype(int)
-        track_ids = result.boxes.id.cpu().numpy().astype(int)
-        class_ids = result.boxes.cls.cpu().numpy().astype(int)
+    def _calculate_detection_priority(self, detection_data: Dict, confidence: float) -> float:
+        """
+        Calculate a priority score for a detection. Higher score means higher priority.
+        Factors: confidence, size (area), whether it's an OBB.
+        """
+        # Base priority is confidence
+        priority = confidence
+
+        # Add bonus for larger objects (more likely to have readable text)
+        coords = detection_data['coordinates']
+        if detection_data['is_obb']:
+            # For OBB, calculate area from minAreaRect
+            points = coords.reshape(4, 2).astype(np.float32)
+            rect = cv2.minAreaRect(points)
+            area = rect[1][0] * rect[1][1]
+        else:
+            # For regular bbox, calculate area from x1,y1,x2,y2
+            x1, y1, x2, y2 = coords
+            area = (x2 - x1) * (y2 - y1)
         
-        for box, track_id, cls_id in zip(boxes, track_ids, class_ids):
-            # Scale coordinates back to original frame size
-            if scale_factor != 1.0:
-                box = (box * scale_factor).astype(int)
-            
-            detection_data = {
-                'coordinates': box,
-                'track_id': track_id,
-                'cls_id': cls_id,
-                'is_obb': False
-            }
-            
-            self.detection_processor.process_detection(
-                frame, detection_data, self.track_ocr_confidence,
-                self.extracted_texts, self.track_colors, self.model, self.frame_count
-            )
-    
+        # Normalize area (example: max area of 10000 pixels gives +1.0 bonus)
+        # Adjust this normalization factor based on expected object sizes
+        area_normalized = min(area / 10000.0, 1.0) 
+        priority += area_normalized * 0.5 # Add up to 0.5 bonus for large objects
+
+        # Add a small bonus for OBB detections if they are generally more accurate for text
+        if detection_data['is_obb']:
+            priority += 0.1
+
+        # Invert priority for min-heap (heapq) to act as max-heap
+        return -priority
+
     def _cleanup(self) -> None:
         """Clean up resources."""
         if self.cap:
