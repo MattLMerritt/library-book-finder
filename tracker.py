@@ -279,11 +279,11 @@ def run_tracker(video_path: str, model_path: str, tracker_config: str,
 if __name__ == "__main__":
     # Configuration with optimized defaults
     VIDEO_PATH = "data/5673626-hd_1920_1080_30fps.mp4"
-    MODEL_PATH = 'yolo11n-obb.pt'
+    MODEL_PATH = 'best_custom_trained_yolo-obb.pt'
     TRACKER_CONFIG = 'bytetrack.yaml'
     CONFIDENCE_THRESHOLD = 0.7
     FRAME_RESIZE_FACTOR = 0.5  # Resize frames to 50% for better performance
-    OCR_FRAME_INTERVAL = 15  # Only attempt OCR every 5 frames per object
-    
+    OCR_FRAME_INTERVAL = 15  # Only attempt OCR every 15 frames per object
+
     run_tracker(VIDEO_PATH, MODEL_PATH, TRACKER_CONFIG, CONFIDENCE_THRESHOLD, 
                 FRAME_RESIZE_FACTOR, OCR_FRAME_INTERVAL)
